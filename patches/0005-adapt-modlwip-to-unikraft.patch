@@ -1,0 +1,242 @@
+--- a/extmod/modlwip.c	2017-08-23 03:50:08.000000000 +0200
++++ b/extmod/modlwip.c	2019-10-08 09:30:52.025714373 +0200
+@@ -29,6 +29,16 @@
+ #include <string.h>
+ #include <stdio.h>
+ 
++#include <uk/print.h>
++#include <netif/uknetdev.h>
++
++#include "lwip/init.h"
++#include "lwip/timeouts.h"
++#include "lwip/tcp.h"
++#include "lwip/udp.h"
++#include "lwip/dns.h"
++#include "lwip/igmp.h"
++
+ #include "py/nlr.h"
+ #include "py/objlist.h"
+ #include "py/runtime.h"
+@@ -38,20 +48,7 @@
+ 
+ #include "lib/netutils/netutils.h"
+ 
+-#include "lwip/init.h"
+-#include "lwip/timers.h"
+-#include "lwip/tcp.h"
+-#include "lwip/udp.h"
+-//#include "lwip/raw.h"
+-#include "lwip/dns.h"
+-#include "lwip/tcp_impl.h"
+-#include "lwip/igmp.h"
+-
+-#if 0 // print debugging info
+-#define DEBUG_printf DEBUG_printf
+-#else // don't print debugging info
+-#define DEBUG_printf(...) (void)0
+-#endif
++#define DEBUG_printf uk_pr_debug
+ 
+ // All socket options should be globally distinct,
+ // because we ignore option levels for efficiency.
+@@ -264,6 +261,11 @@
+ #else
+     mp_hal_delay_ms(1);
+ #endif
++
++    /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
++    uknetdev_poll_all();
++    sys_check_timeouts();
++    /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
+ }
+ 
+ /*******************************************************************************/
+@@ -305,6 +307,7 @@
+     lwip_socket_obj_t *socket = (lwip_socket_obj_t*)arg;
+ 
+     socket->state = STATE_CONNECTED;
++    DEBUG_printf("Socket %p connected\n", socket);
+     return ERR_OK;
+ }
+ 
+@@ -346,6 +349,7 @@
+             // is idle.
+             tcp_poll(newpcb, _lwip_tcp_accept_finished, 1);
+         }
++	DEBUG_printf("Accepted new connection on socket %p\n", socket);
+         return ERR_OK;
+     }
+ }
+@@ -498,6 +502,7 @@
+     u16_t write_len = MIN(available, len);
+ 
+     err_t err = tcp_write(socket->pcb.tcp, buf, write_len, TCP_WRITE_FLAG_COPY);
++    DEBUG_printf("Write to socket %p @%p %u bytes: %d\n", socket, buf, write_len, err);
+ 
+     if (err != ERR_OK) {
+         *_errno = error_lookup_table[-err];
+@@ -524,6 +529,7 @@
+         }
+ 
+         mp_uint_t start = mp_hal_ticks_ms();
++	DEBUG_printf("Wait for data on socket %p to receive...\n", socket);
+         while (socket->state == STATE_CONNECTED && socket->incoming.pbuf == NULL) {
+             if (socket->timeout != -1 && mp_hal_ticks_ms() - start > socket->timeout) {
+                 *_errno = MP_ETIMEDOUT;
+@@ -531,6 +537,7 @@
+             }
+             poll_sockets();
+         }
++	DEBUG_printf("Done\n");
+ 
+         if (socket->state == STATE_PEER_CLOSED) {
+             if (socket->incoming.pbuf == NULL) {
+@@ -636,6 +643,7 @@
+ STATIC mp_obj_t lwip_socket_close(mp_obj_t self_in) {
+     lwip_socket_obj_t *socket = self_in;
+     bool socket_is_listener = false;
++    err_t err;
+ 
+     if (socket->pcb.tcp == NULL) {
+         return mp_const_none;
+@@ -644,8 +652,14 @@
+         case MOD_NETWORK_SOCK_STREAM: {
+             if (socket->pcb.tcp->state == LISTEN) {
+                 socket_is_listener = true;
+-            }
+-            if (tcp_close(socket->pcb.tcp) != ERR_OK) {
++            } else {
++		/* Flush output queue */
++		tcp_output(socket->pcb.tcp);
++	    }
++
++	    err = tcp_close(socket->pcb.tcp);
++	    DEBUG_printf("Closed socket %p: %d\n", socket, err);
++            if (err != ERR_OK) {
+                 DEBUG_printf("lwip_close: had to call tcp_abort()\n");
+                 tcp_abort(socket->pcb.tcp);
+             }
+@@ -660,6 +674,7 @@
+         if (!socket_is_listener) {
+             pbuf_free(socket->incoming.pbuf);
+         } else {
++	    DEBUG_printf("Abort incoming connection request %p\n", socket->incoming.connection);
+             tcp_abort(socket->incoming.connection);
+         }
+         socket->incoming.pbuf = NULL;
+@@ -694,6 +709,7 @@
+         mp_raise_OSError(error_lookup_table[-err]);
+     }
+ 
++    DEBUG_printf("lwip_close: Bind socket %p\n", socket);
+     return mp_const_none;
+ }
+ STATIC MP_DEFINE_CONST_FUN_OBJ_2(lwip_socket_bind_obj, lwip_socket_bind);
+@@ -716,6 +732,7 @@
+     socket->pcb.tcp = new_pcb;
+     tcp_accept(new_pcb, _lwip_tcp_accept);
+ 
++    DEBUG_printf("lwip_listen: Listen on socket %p\n", socket);
+     return mp_const_none;
+ }
+ STATIC MP_DEFINE_CONST_FUN_OBJ_2(lwip_socket_listen_obj, lwip_socket_listen);
+@@ -748,9 +765,11 @@
+                 mp_raise_OSError(MP_ETIMEDOUT);
+             }
+         } else {
++	    DEBUG_printf("Wait for connection on socket %p\n", socket);
+             while (socket->incoming.connection == NULL) {
+                 poll_sockets();
+             }
++	    DEBUG_printf("Done\n");
+         }
+     }
+ 
+@@ -773,6 +792,7 @@
+     tcp_arg(socket2->pcb.tcp, (void*)socket2);
+     tcp_err(socket2->pcb.tcp, _lwip_tcp_error);
+     tcp_recv(socket2->pcb.tcp, _lwip_tcp_recv);
++    DEBUG_printf("New socket for endpoint connection: %p\n", socket2);
+ 
+     tcp_accepted(listener);
+ 
+@@ -1226,6 +1246,7 @@
+ // Support functions for memory protection. lwIP has its own memory management
+ // routines for its internal structures, and since they might be called in
+ // interrupt handlers, they need some protection.
++/*
+ sys_prot_t sys_arch_protect() {
+     return (sys_prot_t)MICROPY_BEGIN_ATOMIC_SECTION();
+ }
+@@ -1233,6 +1254,7 @@
+ void sys_arch_unprotect(sys_prot_t state) {
+     MICROPY_END_ATOMIC_SECTION((mp_uint_t)state);
+ }
++*/
+ 
+ /******************************************************************************/
+ // Polling callbacks for the interfaces connected to lwIP. Right now it calls
+@@ -1246,6 +1268,7 @@
+ STATIC nic_poll_t lwip_poll_list;
+ 
+ void mod_lwip_register_poll(void (* poll)(void *arg), void *poll_arg) {
++    DEBUG_printf("Register poll: %p (argp %p)\n", poll, poll_arg);
+     lwip_poll_list.poll = poll;
+     lwip_poll_list.poll_arg = poll_arg;
+ }
+@@ -1256,15 +1279,21 @@
+ 
+ /******************************************************************************/
+ // The lwip global functions.
++#include <netif/uknetdev.h>
+ 
+ STATIC mp_obj_t mod_lwip_reset() {
+-    lwip_init();
++    DEBUG_printf("lwip reset\n");
++    //lwip_init();
+     lwip_poll_list.poll = NULL;
++
++    /* Register uknetdev polling to molwip */
++    mod_lwip_register_poll(uknetdev_poll_all, NULL);
+     return mp_const_none;
+ }
+ MP_DEFINE_CONST_FUN_OBJ_0(mod_lwip_reset_obj, mod_lwip_reset);
+ 
+ STATIC mp_obj_t mod_lwip_callback() {
++    DEBUG_printf("Exec callback\n");
+     if (lwip_poll_list.poll != NULL) {
+         lwip_poll_list.poll(lwip_poll_list.poll_arg);
+     }
+@@ -1295,6 +1324,7 @@
+     if (n_args > 2) {
+         mp_warning("getaddrinfo constraints not supported");
+     }
++    DEBUG_printf("getaddrinfo\n");
+ 
+     mp_obj_t host_in = args[0], port_in = args[1];
+     const char *host = mp_obj_str_get_str(host_in);
+@@ -1335,13 +1365,13 @@
+ STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lwip_getaddrinfo_obj, 2, 6, lwip_getaddrinfo);
+ 
+ // Debug functions
+-
++/*
+ STATIC mp_obj_t lwip_print_pcbs() {
+     tcp_debug_print_pcbs();
+     return mp_const_none;
+ }
+ MP_DEFINE_CONST_FUN_OBJ_0(lwip_print_pcbs_obj, lwip_print_pcbs);
+-
++*/
+ #ifdef MICROPY_PY_LWIP
+ 
+ STATIC const mp_rom_map_elem_t mp_module_lwip_globals_table[] = {
+@@ -1349,7 +1379,7 @@
+     { MP_ROM_QSTR(MP_QSTR_reset), MP_ROM_PTR(&mod_lwip_reset_obj) },
+     { MP_ROM_QSTR(MP_QSTR_callback), MP_ROM_PTR(&mod_lwip_callback_obj) },
+     { MP_ROM_QSTR(MP_QSTR_getaddrinfo), MP_ROM_PTR(&lwip_getaddrinfo_obj) },
+-    { MP_ROM_QSTR(MP_QSTR_print_pcbs), MP_ROM_PTR(&lwip_print_pcbs_obj) },
++    //{ MP_ROM_QSTR(MP_QSTR_print_pcbs), MP_ROM_PTR(&lwip_print_pcbs_obj) },
+     // objects
+     { MP_ROM_QSTR(MP_QSTR_socket), MP_ROM_PTR(&lwip_socket_type) },
+ #ifdef MICROPY_PY_LWIP_SLIP
