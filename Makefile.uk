@@ -101,6 +101,13 @@ LIBMICROPYTHON_CFLAGS-y += -DUNIX -DN_X64 -D MICROPY_PY_LWIP  \
 			   -Wno-unused-but-set-variable       \
 			   -Wno-unused-function
 
+LIBMICROPYTHON_OPTIMIZATIONS += -fno-gcse -fno-gnu-unique \
+				-fno-move-loop-invariants
+
+CFLAGS-$(CONFIG_LIBMICROPYTHON)   += $(LIBMICROPYTHON_OPTIMIZATIONS)
+CXXFLAGS-$(CONFIG_LIBMICROPYTHON) += $(LIBMICROPYTHON_OPTIMIZATIONS)
+GOFLAGS-$(CONFIG_LIBMICROPYTHON)  += $(LIBMICROPYTHON_OPTIMIZATIONS)
+
 ################################################################################
 # Unikraft <-> Micropython glue code
 ################################################################################
