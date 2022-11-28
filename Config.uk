@@ -5,8 +5,7 @@ menuconfig LIBMICROPYTHON
 	   select LWIP_NOTHREADS
 	   select LWIP_IGMP
 	   select LIBUKMMAP
-	   select LIBNEWLIBC
-	   select LIBUKSIGNAL
+	   select LIBMUSL
 
 if LIBMICROPYTHON
 config LIBMICROPYTHON_MAIN_FUNCTION
